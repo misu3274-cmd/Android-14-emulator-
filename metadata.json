@@ -1,0 +1,6 @@
+{
+  "name": "DeviceSync",
+  "description": "Android 14 device testing and debugging companion with Google Sign-In, cloud-synced settings and progress, and offline-first persistence.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

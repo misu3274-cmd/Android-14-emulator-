@@ -1,0 +1,233 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net: Deny all reads and writes by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- GLOBAL HELPERS ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidTimestamp(ts) {
+      return ts is timestamp && ts <= request.time;
+    }
+
+    // --- VALIDATION HELPERS ---
+    function isValidUserProfile(data, userId) {
+      return data.userId is string &&
+             data.userId == userId &&
+             (!('email' in data) || data.email == null || (data.email is string && data.email.size() <= 254)) &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 100 &&
+             data.lastDeviceModel is string && data.lastDeviceModel.size() >= 1 && data.lastDeviceModel.size() <= 100 &&
+             data.lastAndroidRelease is string && data.lastAndroidRelease.size() >= 1 && data.lastAndroidRelease.size() <= 40 &&
+             data.lastBuildType is string && data.lastBuildType.size() >= 1 && data.lastBuildType.size() <= 40 &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidDeviceSettings(data, userId) {
+      return data.userId is string &&
+             data.userId == userId &&
+             data.themeMode in ['SYSTEM', 'LIGHT', 'DARK'] &&
+             data.dynamicColorEnabled is bool &&
+             data.compactDensityEnabled is bool &&
+             data.hapticsEnabled is bool &&
+             data.autoSyncEnabled is bool &&
+             data.syncOnMeteredEnabled is bool &&
+             data.verboseDebugOverlayEnabled is bool &&
+             data.keepScreenAwakeInDebug is bool &&
+             data.defaultTestEnvironment is string &&
+             data.defaultTestEnvironment.size() >= 1 &&
+             data.defaultTestEnvironment.size() <= 40 &&
+             data.offlineCacheSizeMb is int &&
+             data.offlineCacheSizeMb >= 50 &&
+             data.offlineCacheSizeMb <= 500 &&
+             data.syncCounter is int &&
+             data.syncCounter >= 0 &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidTestProgressItem(data, userId) {
+      return data.userId is string &&
+             data.userId == userId &&
+             data.title is string &&
+             data.title.size() >= 1 &&
+             data.title.size() <= 120 &&
+             data.notes is string &&
+             data.notes.size() <= 1000 &&
+             data.category in ['AUTH', 'OFFLINE', 'SETTINGS', 'DEVICE', 'GENERAL'] &&
+             data.completed is bool &&
+             data.deviceTag is string &&
+             data.deviceTag.size() >= 1 &&
+             data.deviceTag.size() <= 80 &&
+             data.sdkInt is int &&
+             data.sdkInt >= 1 &&
+             data.sdkInt <= 100 &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
+    function isValidDebugLogEntry(data, userId) {
+      return data.userId is string &&
+             data.userId == userId &&
+             data.eventType in ['AUTH_CHECK', 'SYNC_TEST', 'NETWORK_CHANGE', 'SETTINGS_SYNC', 'DEVICE_SNAPSHOT', 'CUSTOM_NOTE'] &&
+             data.summary is string &&
+             data.summary.size() >= 1 &&
+             data.summary.size() <= 240 &&
+             data.details is string &&
+             data.details.size() <= 1000 &&
+             data.networkState is string &&
+             data.networkState.size() >= 1 &&
+             data.networkState.size() <= 40 &&
+             data.deviceModel is string &&
+             data.deviceModel.size() >= 1 &&
+             data.deviceModel.size() <= 80 &&
+             data.androidVersion is string &&
+             data.androidVersion.size() >= 1 &&
+             data.androidVersion.size() <= 40 &&
+             isValidTimestamp(data.createdAt);
+    }
+
+    // --- COLLECTION RULES ---
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if isOwner(userId);
+
+      allow create: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       incoming().keys().hasAll([
+                         'userId', 'displayName', 'lastDeviceModel',
+                         'lastAndroidRelease', 'lastBuildType', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'email', 'displayName', 'lastDeviceModel',
+                         'lastAndroidRelease', 'lastBuildType', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidUserProfile(incoming(), userId);
+
+      allow update: if isOwner(userId) &&
+                       isValidId(userId) &&
+                       isValidUserProfile(incoming(), userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'email', 'displayName', 'lastDeviceModel',
+                         'lastAndroidRelease', 'lastBuildType', 'updatedAt'
+                       ]);
+
+      allow delete: if isOwner(userId) && isValidId(userId);
+
+      // Cloud-synced settings
+      match /settings/{settingId} {
+        allow get: if isOwner(userId) && isValidId(settingId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(settingId) &&
+                         incoming().keys().hasAll([
+                           'userId', 'themeMode', 'dynamicColorEnabled', 'compactDensityEnabled',
+                           'hapticsEnabled', 'autoSyncEnabled', 'syncOnMeteredEnabled',
+                           'verboseDebugOverlayEnabled', 'keepScreenAwakeInDebug',
+                           'defaultTestEnvironment', 'offlineCacheSizeMb', 'syncCounter',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'themeMode', 'dynamicColorEnabled', 'compactDensityEnabled',
+                           'hapticsEnabled', 'autoSyncEnabled', 'syncOnMeteredEnabled',
+                           'verboseDebugOverlayEnabled', 'keepScreenAwakeInDebug',
+                           'defaultTestEnvironment', 'offlineCacheSizeMb', 'syncCounter',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidDeviceSettings(incoming(), userId);
+
+        allow update: if isOwner(userId) &&
+                         isValidId(settingId) &&
+                         isValidDeviceSettings(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'themeMode', 'dynamicColorEnabled', 'compactDensityEnabled',
+                           'hapticsEnabled', 'autoSyncEnabled', 'syncOnMeteredEnabled',
+                           'verboseDebugOverlayEnabled', 'keepScreenAwakeInDebug',
+                           'defaultTestEnvironment', 'offlineCacheSizeMb', 'syncCounter',
+                           'updatedAt'
+                         ]);
+
+        allow delete: if isOwner(userId) && isValidId(settingId);
+      }
+
+      // Auto-saved test progress checkpoints & notes
+      match /test_items/{itemId} {
+        allow get: if isOwner(userId) && isValidId(itemId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(itemId) &&
+                         incoming().keys().hasAll([
+                           'userId', 'title', 'notes', 'category', 'completed',
+                           'deviceTag', 'sdkInt', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'title', 'notes', 'category', 'completed',
+                           'deviceTag', 'sdkInt', 'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidTestProgressItem(incoming(), userId);
+
+        allow update: if isOwner(userId) &&
+                         isValidId(itemId) &&
+                         isValidTestProgressItem(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'title', 'notes', 'category', 'completed',
+                           'deviceTag', 'sdkInt', 'updatedAt'
+                         ]);
+
+        allow delete: if isOwner(userId) && isValidId(itemId);
+      }
+
+      // Diagnostic debug breadcrumbs (append & delete)
+      match /debug_logs/{logId} {
+        allow get: if isOwner(userId) && isValidId(logId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(logId) &&
+                         incoming().keys().hasAll([
+                           'userId', 'eventType', 'summary', 'details',
+                           'networkState', 'deviceModel', 'androidVersion', 'createdAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'eventType', 'summary', 'details',
+                           'networkState', 'deviceModel', 'androidVersion', 'createdAt'
+                         ]) &&
+                         isValidDebugLogEntry(incoming(), userId);
+
+        allow update: if false;
+
+        allow delete: if isOwner(userId) && isValidId(logId);
+      }
+    }
+  }
+}
