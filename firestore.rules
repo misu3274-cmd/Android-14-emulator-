@@ -109,6 +109,24 @@ service cloud.firestore {
              isValidTimestamp(data.createdAt);
     }
 
+    function isValidVaultItem(data, userId) {
+      return data.userId is string &&
+             data.userId == userId &&
+             data.title is string &&
+             data.title.size() >= 1 &&
+             data.title.size() <= 120 &&
+             data.subtitle is string &&
+             data.subtitle.size() <= 160 &&
+             data.notes is string &&
+             data.notes.size() <= 1500 &&
+             data.category in ['ACCOUNT', 'APP', 'GAME', 'FILE', 'OTHER'] &&
+             data.sizeLabel is string &&
+             data.sizeLabel.size() <= 40 &&
+             data.pinnedOffline is bool &&
+             isValidTimestamp(data.createdAt) &&
+             isValidTimestamp(data.updatedAt);
+    }
+
     // --- COLLECTION RULES ---
     match /users/{userId} {
       allow get: if isOwner(userId) && isValidId(userId);
@@ -227,6 +245,36 @@ service cloud.firestore {
         allow update: if false;
 
         allow delete: if isOwner(userId) && isValidId(logId);
+      }
+
+      // Offline-saved accounts, apps, games, files, and other items
+      match /vault_items/{itemId} {
+        allow get: if isOwner(userId) && isValidId(itemId);
+        allow list: if isOwner(userId);
+
+        allow create: if isOwner(userId) &&
+                         isValidId(itemId) &&
+                         incoming().keys().hasAll([
+                           'userId', 'title', 'subtitle', 'notes', 'category',
+                           'sizeLabel', 'pinnedOffline', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'title', 'subtitle', 'notes', 'category',
+                           'sizeLabel', 'pinnedOffline', 'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidVaultItem(incoming(), userId);
+
+        allow update: if isOwner(userId) &&
+                         isValidId(itemId) &&
+                         isValidVaultItem(incoming(), userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'title', 'subtitle', 'notes', 'category',
+                           'sizeLabel', 'pinnedOffline', 'updatedAt'
+                         ]);
+
+        allow delete: if isOwner(userId) && isValidId(itemId);
       }
     }
   }

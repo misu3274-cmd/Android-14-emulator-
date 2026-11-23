@@ -55,6 +55,7 @@ import com.example.data.model.SyncedCollection
 import com.example.data.model.SyncedDocument
 import com.example.data.model.TestProgressItem
 import com.example.data.model.UserProfile
+import com.example.data.model.VaultItem
 import com.example.ui.theme.MonoFontFamily
 import com.example.ui.theme.SyncAmber
 import com.example.ui.theme.SyncCyan
@@ -71,16 +72,20 @@ fun OverviewTab(
     profileState: UiState<SyncedDocument<UserProfile>>,
     settingsState: UiState<SyncedDocument<DeviceSettings>>,
     testItemsState: UiState<SyncedCollection<TestProgressItem>>,
+    vaultItemsState: UiState<SyncedCollection<VaultItem>>,
     compact: Boolean,
     onRefreshAndCaptureSnapshot: () -> Unit,
     onExportReport: () -> Unit,
     onSignOut: () -> Unit,
     onNavigateToProgress: () -> Unit,
+    onNavigateToVault: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val itemSpacing = if (compact) 10.dp else 14.dp
     val items = (testItemsState as? UiState.Success)?.data?.items.orEmpty()
     val completedCount = items.count { it.completed }
+    val vaultItems = (vaultItemsState as? UiState.Success)?.data?.items.orEmpty()
+    val pinnedVaultCount = vaultItems.count { it.pinnedOffline }
     val settings = (settingsState as? UiState.Success)?.data?.data
     val profile = (profileState as? UiState.Success)?.data?.data
 
@@ -214,17 +219,17 @@ fun OverviewTab(
             }
         }
 
-        // Cloud Sync & Progress Summary Row
-        item {
+        // Cloud Sync, Offline Vault & Progress Summary Row
+        item(key = "summary_row", contentType = "summary") {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Card(
-                    onClick = onNavigateToProgress,
+                    onClick = onNavigateToVault,
                     modifier = Modifier
                         .weight(1f)
-                        .testTag("overview_progress_card"),
+                        .testTag("overview_vault_card"),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
                 ) {
                     Column(
@@ -237,18 +242,18 @@ fun OverviewTab(
                         ) {
                             Icon(
                                 imageVector = Icons.Filled.CheckCircle,
-                                contentDescription = "QA Progress",
-                                tint = MaterialTheme.colorScheme.primary,
+                                contentDescription = "Offline Vault",
+                                tint = SyncEmerald,
                                 modifier = Modifier.size(18.dp)
                             )
-                            Text("QA Progress", style = MaterialTheme.typography.titleSmall)
+                            Text("Offline Vault", style = MaterialTheme.typography.titleSmall)
                         }
                         Text(
-                            text = if (items.isEmpty()) "0 tasks" else "$completedCount / ${items.size} done",
+                            text = "${vaultItems.size} saved",
                             style = MaterialTheme.typography.headlineSmall
                         )
                         Text(
-                            text = "Auto-saved to Firestore",
+                            text = "$pinnedVaultCount pinned • ${completedCount}/${items.size} tasks",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )

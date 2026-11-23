@@ -142,10 +142,12 @@ fun ProgressTab(
                 }
                 is UiState.Success -> {
                     val allItems = testItemsState.data.items
-                    val filtered = if (selectedCategory == null) {
-                        allItems
-                    } else {
-                        allItems.filter { it.resolvedCategory == selectedCategory }
+                    val filtered = remember(allItems, selectedCategory) {
+                        if (selectedCategory == null) {
+                            allItems
+                        } else {
+                            allItems.filter { it.resolvedCategory == selectedCategory }
+                        }
                     }
                     val meta = testItemsState.data.metadata
 
@@ -202,7 +204,11 @@ fun ProgressTab(
                             contentPadding = PaddingValues(bottom = 88.dp),
                             verticalArrangement = Arrangement.spacedBy(if (compact) 8.dp else 10.dp)
                         ) {
-                            items(filtered, key = { it.id }) { item ->
+                            items(
+                                items = filtered,
+                                key = { it.id },
+                                contentType = { "test_progress_item" }
+                            ) { item ->
                                 TestProgressCard(
                                     item = item,
                                     hasPendingWrites = meta.hasPendingWrites,

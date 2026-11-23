@@ -302,3 +302,79 @@ test("ID poisoning guard rejects oversized or invalid document IDs", async () =>
     })
   );
 });
+
+test("VaultItem: owner CRUD across ACCOUNT/APP/GAME/FILE/OTHER, validation & isolation", async () => {
+  const aliceDb = testEnv.authenticatedContext(ALICE_UID).firestore();
+  const bobDb = testEnv.authenticatedContext(BOB_UID).firestore();
+  const unauthDb = testEnv.unauthenticatedContext().firestore();
+  const vaultCol = aliceDb.collection("users").doc(ALICE_UID).collection("vault_items");
+  const created = pastTime(10000);
+
+  await assertFails(unauthDb.collection("users").doc(ALICE_UID).collection("vault_items").get());
+  await assertSucceeds(vaultCol.get());
+
+  await assertSucceeds(
+    vaultCol.doc("vault_1").set({
+      userId: ALICE_UID,
+      title: "Emulator Save - Pixel RPG",
+      subtitle: "com.studio.pixelrpg",
+      notes: "Chapter 4 boss checkpoint synced offline.",
+      category: "GAME",
+      sizeLabel: "Lvl 24",
+      pinnedOffline: true,
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+
+  await assertSucceeds(
+    vaultCol.doc("vault_1").update({
+      pinnedOffline: false,
+      sizeLabel: "Lvl 25",
+      updatedAt: pastTime(1000),
+    })
+  );
+
+  // Invalid category rejected
+  await assertFails(
+    vaultCol.doc("vault_2").set({
+      userId: ALICE_UID,
+      title: "Invalid Category",
+      subtitle: "",
+      notes: "",
+      category: "UNKNOWN",
+      sizeLabel: "",
+      pinnedOffline: true,
+      createdAt: created,
+      updatedAt: created,
+    })
+  );
+
+  // Ghost field & immutable createdAt rejected
+  await assertFails(
+    vaultCol.doc("vault_1").update({
+      adminOverride: true,
+      updatedAt: pastTime(500),
+    })
+  );
+  await assertFails(
+    vaultCol.doc("vault_1").update({
+      createdAt: pastTime(500),
+      updatedAt: pastTime(500),
+    })
+  );
+
+  // Bob cannot read or mutate Alice's vault items
+  await assertFails(bobDb.collection("users").doc(ALICE_UID).collection("vault_items").get());
+  await assertFails(
+    bobDb.collection("users").doc(ALICE_UID).collection("vault_items").doc("vault_1").update({
+      pinnedOffline: false,
+      updatedAt: pastTime(500),
+    })
+  );
+  await assertFails(
+    bobDb.collection("users").doc(ALICE_UID).collection("vault_items").doc("vault_1").delete()
+  );
+
+  await assertSucceeds(vaultCol.doc("vault_1").delete());
+});

@@ -125,7 +125,11 @@ fun LogsTab(
                             contentPadding = PaddingValues(top = 8.dp, bottom = 88.dp),
                             verticalArrangement = Arrangement.spacedBy(if (compact) 8.dp else 10.dp)
                         ) {
-                            items(logs, key = { it.id }) { entry ->
+                            items(
+                                items = logs,
+                                key = { it.id },
+                                contentType = { "debug_log_entry" }
+                            ) { entry ->
                                 DebugLogCard(
                                     entry = entry,
                                     compact = compact,

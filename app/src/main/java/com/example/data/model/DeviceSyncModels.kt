@@ -44,6 +44,43 @@ enum class DebugEventType(val label: String) {
     }
 }
 
+enum class VaultCategory(val label: String) {
+    ACCOUNT("Accounts"),
+    APP("Apps"),
+    GAME("Games"),
+    FILE("Files"),
+    OTHER("Other");
+
+    companion object {
+        fun safeValueOf(raw: String?): VaultCategory =
+            entries.firstOrNull { it.name == raw } ?: OTHER
+    }
+}
+
+@Keep
+@IgnoreExtraProperties
+data class VaultItem(
+    @DocumentId val id: String = "",
+    val userId: String = "",
+    val title: String = "",
+    val subtitle: String = "",
+    val notes: String = "",
+    val category: String = VaultCategory.OTHER.name,
+    val sizeLabel: String = "",
+    val pinnedOffline: Boolean = true,
+    @ServerTimestamp val createdAt: Timestamp? = null,
+    @ServerTimestamp val updatedAt: Timestamp? = null
+) {
+    val resolvedCategory: VaultCategory
+        get() = VaultCategory.safeValueOf(category)
+}
+
+data class OfflineSaveSummary(
+    val totalCachedItems: Int = 0,
+    val pinnedVaultItems: Int = 0,
+    val savedAtLabel: String = ""
+)
+
 @Keep
 @IgnoreExtraProperties
 data class UserProfile(

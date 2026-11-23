@@ -1,5 +1,6 @@
 package com.example.ui.screens
 
+import android.os.Build
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -57,7 +58,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.credentials.CredentialManager
 import com.example.R
-import com.example.data.firebase.DeviceInfoProvider
 import com.example.data.firebase.attemptAutoSignIn
 import com.example.data.firebase.onGoogleSignInClicked
 import com.example.ui.theme.MonoFontFamily
@@ -70,7 +70,9 @@ fun AuthScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val credentialManager = remember(context) { CredentialManager.create(context) }
-    val telemetry = remember(context) { DeviceInfoProvider(context).captureSnapshot() }
+    val deviceBadge = remember {
+        "${Build.MODEL} • Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}) • ${Build.TYPE}"
+    }
 
     var isCheckingAutoSignIn by remember { mutableStateOf(true) }
     var isSigningIn by remember { mutableStateOf(false) }
@@ -99,7 +101,7 @@ fun AuthScreen(
                     Brush.verticalGradient(
                         colors = listOf(
                             MaterialTheme.colorScheme.background,
-                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.28f),
+                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f),
                             MaterialTheme.colorScheme.background
                         )
                     )
@@ -152,7 +154,7 @@ fun AuthScreen(
                                 .background(SyncEmerald)
                         )
                         Text(
-                            text = "${telemetry.model} • ${telemetry.androidRelease} • ${telemetry.buildType}",
+                            text = deviceBadge,
                             style = MaterialTheme.typography.labelSmall,
                             fontFamily = MonoFontFamily,
                             color = MaterialTheme.colorScheme.onSecondaryContainer
@@ -203,13 +205,13 @@ fun AuthScreen(
                         )
                         FeatureRow(
                             icon = Icons.Filled.CloudDone,
-                            title = "Automatic Cloud Settings & Progress",
-                            subtitle = "Every preference, QA checkpoint, and debug log syncs automatically to Firestore."
+                            title = "Offline Vault & Cloud Sync",
+                            subtitle = "Save accounts, apps, games, files, settings, and tasks offline with instant cloud backup."
                         )
                         FeatureRow(
                             icon = Icons.Filled.OfflineBolt,
                             title = "Uninterrupted Offline Persistence",
-                            subtitle = "Local disk cache keeps your workspace working even on unstable or offline connections."
+                            subtitle = "Zero-lag local cache keeps your workspace smooth even on unstable connections."
                         )
                         FeatureRow(
                             icon = Icons.Filled.DeveloperMode,

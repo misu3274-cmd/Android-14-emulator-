@@ -16,6 +16,9 @@ import com.example.data.model.TestCategory
 import com.example.data.model.TestProgressItem
 import com.example.data.model.ThemeMode
 import com.example.data.model.UserProfile
+import com.example.data.model.VaultCategory
+import com.example.data.model.VaultItem
+import com.google.android.gms.tasks.Task
 import com.google.firebase.Firebase
 import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
@@ -31,12 +34,17 @@ import com.google.firebase.firestore.firestoreSettings
 import com.google.firebase.firestore.persistentCacheSettings
 import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 enum class WriteSyncResult {
@@ -68,8 +76,11 @@ class DeviceSyncRepository(
     private fun debugLogsCollection(uid: String) =
         userDocRef(uid).collection("debug_logs")
 
-    suspend fun setNetworkEnabled(enabled: Boolean): Result<Unit> {
-        return try {
+    private fun vaultItemsCollection(uid: String) =
+        userDocRef(uid).collection("vault_items")
+
+    suspend fun setNetworkEnabled(enabled: Boolean): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
             if (enabled) {
                 db.enableNetwork().await()
             } else {
@@ -116,7 +127,7 @@ class DeviceSyncRepository(
                     throw error
                 }
         )
-    }
+    }.flowOn(Dispatchers.Default)
 
     fun observeDeviceSettings(userId: String): Flow<SyncedDocument<DeviceSettings>> = flow {
         val uid = requireUserId()
@@ -150,7 +161,7 @@ class DeviceSyncRepository(
                     throw error
                 }
         )
-    }
+    }.flowOn(Dispatchers.Default)
 
     fun observeTestItems(userId: String): Flow<SyncedCollection<TestProgressItem>> = flow {
         val uid = requireUserId()
@@ -184,7 +195,7 @@ class DeviceSyncRepository(
                     throw error
                 }
         )
-    }
+    }.flowOn(Dispatchers.Default)
 
     fun observeDebugLogs(userId: String): Flow<SyncedCollection<DebugLogEntry>> = flow {
         val uid = requireUserId()
@@ -219,28 +230,116 @@ class DeviceSyncRepository(
                     throw error
                 }
         )
+    }.flowOn(Dispatchers.Default)
+
+    fun observeVaultItems(userId: String): Flow<SyncedCollection<VaultItem>> = flow {
+        val uid = requireUserId()
+        check(uid == userId) { "Signed-in user mismatch" }
+        val colRef = vaultItemsCollection(uid)
+        emitAll(
+            colRef.orderBy("createdAt", Query.Direction.DESCENDING)
+                .snapshots(MetadataChanges.INCLUDE)
+                .map { snapshot ->
+                    val items = snapshot.toObjects(
+                        VaultItem::class.java,
+                        DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+                    ).sortedWith(
+                        compareByDescending<VaultItem> { it.pinnedOffline }
+                            .thenByDescending { it.updatedAt ?: it.createdAt ?: Timestamp(0, 0) }
+                    )
+                    SyncedCollection(
+                        items = items,
+                        metadata = SyncMetadataState(
+                            isFromCache = snapshot.metadata.isFromCache,
+                            hasPendingWrites = snapshot.metadata.hasPendingWrites()
+                        )
+                    )
+                }
+                .catch { error ->
+                    val firestoreError = generateSequence(error) { it.cause }
+                        .filterIsInstance<FirebaseFirestoreException>()
+                        .firstOrNull()
+                    if (firestoreError == null && error is CancellationException) throw error
+                    val exceptionToLog = firestoreError ?: (error as? Exception)
+                    if (exceptionToLog != null && auth.currentUser?.uid == uid) {
+                        handleFirestoreError(exceptionToLog, OperationType.LIST, colRef.path)
+                    }
+                    throw error
+                }
+        )
+    }.flowOn(Dispatchers.Default)
+
+    /**
+     * Explicitly warms and verifies local Firestore persistent cache across all collections
+     * so everything (settings, accounts, apps, games, files, tasks, logs) is ready offline.
+     */
+    suspend fun saveAllForOfflineUse(
+        userId: String,
+        isOnline: Boolean
+    ): Result<Int> = withContext(Dispatchers.IO) {
+        try {
+            val uid = requireUserId()
+            check(uid == userId) { "Signed-in user mismatch" }
+
+            val source = if (isOnline) Source.DEFAULT else Source.CACHE
+            coroutineScope {
+                val profileJob = async {
+                    withTimeoutOrNull(1800L) { runCatching { userDocRef(uid).get(source).await() }.getOrNull() }
+                        ?: runCatching { userDocRef(uid).get(Source.CACHE).await() }.getOrNull()
+                }
+                val settingsJob = async {
+                    withTimeoutOrNull(1800L) { runCatching { settingsDocRef(uid).get(source).await() }.getOrNull() }
+                        ?: runCatching { settingsDocRef(uid).get(Source.CACHE).await() }.getOrNull()
+                }
+                val itemsJob = async {
+                    withTimeoutOrNull(2000L) { runCatching { testItemsCollection(uid).get(source).await() }.getOrNull() }
+                        ?: runCatching { testItemsCollection(uid).get(Source.CACHE).await() }.getOrNull()
+                }
+                val vaultJob = async {
+                    withTimeoutOrNull(2000L) { runCatching { vaultItemsCollection(uid).get(source).await() }.getOrNull() }
+                        ?: runCatching { vaultItemsCollection(uid).get(Source.CACHE).await() }.getOrNull()
+                }
+                val logsJob = async {
+                    withTimeoutOrNull(2000L) { runCatching { debugLogsCollection(uid).limit(60).get(source).await() }.getOrNull() }
+                        ?: runCatching { debugLogsCollection(uid).limit(60).get(Source.CACHE).await() }.getOrNull()
+                }
+
+                val count =
+                    (if (profileJob.await()?.exists() == true) 1 else 0) +
+                        (if (settingsJob.await()?.exists() == true) 1 else 0) +
+                        (itemsJob.await()?.size() ?: 0) +
+                        (vaultJob.await()?.size() ?: 0) +
+                        (logsJob.await()?.size() ?: 0)
+                Result.success(count)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.GET, "users/$userId")
+            Result.failure(e)
+        }
     }
 
     suspend fun ensureBootstrapData(
         userId: String,
         telemetry: DeviceTelemetrySnapshot,
         isOnline: Boolean
-    ): Result<WriteSyncResult> {
+    ): Result<WriteSyncResult> = withContext(Dispatchers.IO) {
         val uid = try {
             requireUserId()
         } catch (e: Exception) {
-            return Result.failure(e)
+            return@withContext Result.failure(e)
         }
-        if (uid != userId) return Result.failure(IllegalStateException("User changed during bootstrap"))
+        if (uid != userId) return@withContext Result.failure(IllegalStateException("User changed during bootstrap"))
 
         val profileResult = syncUserProfile(userId, telemetry, isOnline)
-        if (profileResult.isFailure) return profileResult
+        if (profileResult.isFailure) return@withContext profileResult
 
         val settingsRef = settingsDocRef(uid)
-        return try {
+        try {
             val cached = runCatching { settingsRef.get(Source.CACHE).await() }.getOrNull()
             val existing = cached?.takeIf { it.exists() }
-                ?: withTimeoutOrNull(2000L) { runCatching { settingsRef.get().await() }.getOrNull() }
+                ?: if (isOnline) withTimeoutOrNull(1500L) { runCatching { settingsRef.get().await() }.getOrNull() } else null
 
             if (existing == null || !existing.exists()) {
                 val payload = mapOf(
@@ -254,17 +353,12 @@ class DeviceSyncRepository(
                     "verboseDebugOverlayEnabled" to true,
                     "keepScreenAwakeInDebug" to false,
                     "defaultTestEnvironment" to if (telemetry.isEmulatorOrSdkGphone) "sdk_gphone_api${telemetry.sdkInt}" else "physical_api${telemetry.sdkInt}",
-                    "offlineCacheSizeMb" to 200L,
+                    "offlineCacheSizeMb" to 250L,
                     "syncCounter" to 1L,
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-                awaitOfflineAware(
-                    task = settingsRef.set(payload),
-                    operationType = OperationType.CREATE,
-                    path = settingsRef.path,
-                    expectOnline = isOnline
-                )
+                dispatchWrite(settingsRef.set(payload), OperationType.CREATE, settingsRef.path, isOnline)
             } else {
                 Result.success(WriteSyncResult.SYNCED_CLOUD)
             }
@@ -280,9 +374,9 @@ class DeviceSyncRepository(
         userId: String,
         telemetry: DeviceTelemetrySnapshot,
         isOnline: Boolean
-    ): Result<WriteSyncResult> {
+    ): Result<WriteSyncResult> = withContext(Dispatchers.IO) {
         var docPath = "users/$userId"
-        return try {
+        try {
             val uid = requireUserId()
             check(uid == userId) { "Signed-in user mismatch" }
             val user = auth.currentUser
@@ -297,9 +391,10 @@ class DeviceSyncRepository(
 
             val cached = runCatching { docRef.get(Source.CACHE).await() }.getOrNull()
             val existing = cached?.takeIf { it.exists() }
-                ?: withTimeoutOrNull(2000L) { runCatching { docRef.get().await() }.getOrNull() }
+                ?: if (isOnline) withTimeoutOrNull(1500L) { runCatching { docRef.get().await() }.getOrNull() } else null
 
-            val task = if (existing == null || !existing.exists()) {
+            val isCreate = existing == null || !existing.exists()
+            val task = if (isCreate) {
                 val createPayload = mapOf(
                     "userId" to uid,
                     "email" to email,
@@ -323,11 +418,11 @@ class DeviceSyncRepository(
                 docRef.update(updatePayload)
             }
 
-            awaitOfflineAware(
+            dispatchWrite(
                 task = task,
-                operationType = if (existing == null || !existing.exists()) OperationType.CREATE else OperationType.UPDATE,
+                operationType = if (isCreate) OperationType.CREATE else OperationType.UPDATE,
                 path = docPath,
-                expectOnline = isOnline
+                isOnline = isOnline
             )
         } catch (e: CancellationException) {
             throw e
@@ -337,9 +432,10 @@ class DeviceSyncRepository(
         }
     }
 
-    suspend fun saveDeviceSettings(
+    fun saveDeviceSettings(
         userId: String,
         updated: DeviceSettings,
+        existsInFirestore: Boolean,
         isOnline: Boolean
     ): Result<WriteSyncResult> {
         var docPath = "users/$userId/settings/$DEFAULT_SETTINGS_DOC_ID"
@@ -353,10 +449,7 @@ class DeviceSyncRepository(
             val safeCacheMb = updated.offlineCacheSizeMb.coerceIn(50L, 500L)
             val nextCounter = (updated.syncCounter + 1L).coerceAtLeast(1L)
 
-            val cached = runCatching { docRef.get(Source.CACHE).await() }.getOrNull()
-            val existsLocally = cached?.exists() == true || updated.createdAt != null
-
-            if (!existsLocally) {
+            if (!existsInFirestore && updated.createdAt == null) {
                 val createPayload = mapOf(
                     "userId" to uid,
                     "themeMode" to updated.resolvedThemeMode.name,
@@ -373,7 +466,7 @@ class DeviceSyncRepository(
                     "createdAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-                awaitOfflineAware(docRef.set(createPayload), OperationType.CREATE, docPath, isOnline)
+                dispatchWrite(docRef.set(createPayload), OperationType.CREATE, docPath, isOnline)
             } else {
                 val updatePayload = mapOf(
                     "themeMode" to updated.resolvedThemeMode.name,
@@ -389,7 +482,7 @@ class DeviceSyncRepository(
                     "syncCounter" to nextCounter,
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
-                awaitOfflineAware(docRef.update(updatePayload), OperationType.UPDATE, docPath, isOnline)
+                dispatchWrite(docRef.update(updatePayload), OperationType.UPDATE, docPath, isOnline)
             }
         } catch (e: CancellationException) {
             throw e
@@ -399,7 +492,138 @@ class DeviceSyncRepository(
         }
     }
 
-    suspend fun addTestItem(
+    fun addVaultItem(
+        userId: String,
+        title: String,
+        subtitle: String,
+        notes: String,
+        category: VaultCategory,
+        sizeLabel: String,
+        pinnedOffline: Boolean,
+        isOnline: Boolean
+    ): Result<WriteSyncResult> {
+        var docPath = "users/$userId/vault_items"
+        return try {
+            val uid = requireUserId()
+            check(uid == userId) { "Signed-in user mismatch" }
+            val safeTitle = title.trim().take(120)
+            require(safeTitle.isNotEmpty()) { "Title cannot be empty" }
+
+            val docRef = vaultItemsCollection(uid).document()
+            docPath = docRef.path
+            val payload = mapOf(
+                "userId" to uid,
+                "title" to safeTitle,
+                "subtitle" to subtitle.trim().take(160),
+                "notes" to notes.trim().take(1500),
+                "category" to category.name,
+                "sizeLabel" to sizeLabel.trim().take(40),
+                "pinnedOffline" to pinnedOffline,
+                "createdAt" to FieldValue.serverTimestamp(),
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            dispatchWrite(docRef.set(payload), OperationType.CREATE, docPath, isOnline)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.CREATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    fun updateVaultItem(
+        userId: String,
+        itemId: String,
+        title: String,
+        subtitle: String,
+        notes: String,
+        category: VaultCategory,
+        sizeLabel: String,
+        pinnedOffline: Boolean,
+        isOnline: Boolean
+    ): Result<WriteSyncResult> {
+        var docPath = "users/$userId/vault_items/$itemId"
+        return try {
+            val uid = requireUserId()
+            check(uid == userId) { "Signed-in user mismatch" }
+            require(itemId.isNotBlank()) { "Vault item ID required" }
+            val safeTitle = title.trim().take(120)
+            require(safeTitle.isNotEmpty()) { "Title cannot be empty" }
+
+            val docRef = vaultItemsCollection(uid).document(itemId)
+            docPath = docRef.path
+            val payload = mapOf(
+                "title" to safeTitle,
+                "subtitle" to subtitle.trim().take(160),
+                "notes" to notes.trim().take(1500),
+                "category" to category.name,
+                "sizeLabel" to sizeLabel.trim().take(40),
+                "pinnedOffline" to pinnedOffline,
+                "updatedAt" to FieldValue.serverTimestamp()
+            )
+            dispatchWrite(docRef.update(payload), OperationType.UPDATE, docPath, isOnline)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    fun toggleVaultPinnedOffline(
+        userId: String,
+        itemId: String,
+        pinnedOffline: Boolean,
+        isOnline: Boolean
+    ): Result<WriteSyncResult> {
+        var docPath = "users/$userId/vault_items/$itemId"
+        return try {
+            val uid = requireUserId()
+            check(uid == userId) { "Signed-in user mismatch" }
+            require(itemId.isNotBlank()) { "Vault item ID required" }
+            val docRef = vaultItemsCollection(uid).document(itemId)
+            docPath = docRef.path
+            dispatchWrite(
+                docRef.update(
+                    mapOf(
+                        "pinnedOffline" to pinnedOffline,
+                        "updatedAt" to FieldValue.serverTimestamp()
+                    )
+                ),
+                OperationType.UPDATE,
+                docPath,
+                isOnline
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    fun deleteVaultItem(
+        userId: String,
+        itemId: String,
+        isOnline: Boolean
+    ): Result<WriteSyncResult> {
+        var docPath = "users/$userId/vault_items/$itemId"
+        return try {
+            val uid = requireUserId()
+            check(uid == userId) { "Signed-in user mismatch" }
+            require(itemId.isNotBlank()) { "Vault item ID required" }
+            val docRef = vaultItemsCollection(uid).document(itemId)
+            docPath = docRef.path
+            dispatchWrite(docRef.delete(), OperationType.DELETE, docPath, isOnline)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.DELETE, docPath)
+            Result.failure(e)
+        }
+    }
+
+    fun addTestItem(
         userId: String,
         title: String,
         notes: String,
@@ -430,7 +654,7 @@ class DeviceSyncRepository(
                 "createdAt" to FieldValue.serverTimestamp(),
                 "updatedAt" to FieldValue.serverTimestamp()
             )
-            awaitOfflineAware(docRef.set(payload), OperationType.CREATE, docPath, isOnline)
+            dispatchWrite(docRef.set(payload), OperationType.CREATE, docPath, isOnline)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -439,7 +663,7 @@ class DeviceSyncRepository(
         }
     }
 
-    suspend fun updateTestItem(
+    fun updateTestItem(
         userId: String,
         itemId: String,
         title: String,
@@ -466,7 +690,7 @@ class DeviceSyncRepository(
                 "completed" to completed,
                 "updatedAt" to FieldValue.serverTimestamp()
             )
-            awaitOfflineAware(docRef.update(payload), OperationType.UPDATE, docPath, isOnline)
+            dispatchWrite(docRef.update(payload), OperationType.UPDATE, docPath, isOnline)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -475,7 +699,7 @@ class DeviceSyncRepository(
         }
     }
 
-    suspend fun toggleTestItem(
+    fun toggleTestItem(
         userId: String,
         itemId: String,
         completed: Boolean,
@@ -488,7 +712,7 @@ class DeviceSyncRepository(
             require(itemId.isNotBlank()) { "Item ID required" }
             val docRef = testItemsCollection(uid).document(itemId)
             docPath = docRef.path
-            awaitOfflineAware(
+            dispatchWrite(
                 docRef.update(
                     mapOf(
                         "completed" to completed,
@@ -507,7 +731,7 @@ class DeviceSyncRepository(
         }
     }
 
-    suspend fun deleteTestItem(
+    fun deleteTestItem(
         userId: String,
         itemId: String,
         isOnline: Boolean
@@ -519,7 +743,7 @@ class DeviceSyncRepository(
             require(itemId.isNotBlank()) { "Item ID required" }
             val docRef = testItemsCollection(uid).document(itemId)
             docPath = docRef.path
-            awaitOfflineAware(docRef.delete(), OperationType.DELETE, docPath, isOnline)
+            dispatchWrite(docRef.delete(), OperationType.DELETE, docPath, isOnline)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -528,7 +752,7 @@ class DeviceSyncRepository(
         }
     }
 
-    suspend fun appendDebugLog(
+    fun appendDebugLog(
         userId: String,
         eventType: DebugEventType,
         summary: String,
@@ -559,7 +783,7 @@ class DeviceSyncRepository(
                 "androidVersion" to safeRelease,
                 "createdAt" to FieldValue.serverTimestamp()
             )
-            awaitOfflineAware(docRef.set(payload), OperationType.CREATE, docPath, isOnline)
+            dispatchWrite(docRef.set(payload), OperationType.CREATE, docPath, isOnline)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -568,7 +792,7 @@ class DeviceSyncRepository(
         }
     }
 
-    suspend fun deleteDebugLog(
+    fun deleteDebugLog(
         userId: String,
         logId: String,
         isOnline: Boolean
@@ -580,7 +804,7 @@ class DeviceSyncRepository(
             require(logId.isNotBlank()) { "Log ID required" }
             val docRef = debugLogsCollection(uid).document(logId)
             docPath = docRef.path
-            awaitOfflineAware(docRef.delete(), OperationType.DELETE, docPath, isOnline)
+            dispatchWrite(docRef.delete(), OperationType.DELETE, docPath, isOnline)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -589,34 +813,23 @@ class DeviceSyncRepository(
         }
     }
 
-    private suspend fun awaitOfflineAware(
-        task: com.google.android.gms.tasks.Task<Void>,
+    /**
+     * Non-blocking local-first write dispatch:
+     * Firestore immediately commits to its persistent local cache and emits via snapshots(),
+     * eliminating multi-second UI stalls while still logging any deferred backend failures.
+     */
+    private fun dispatchWrite(
+        task: Task<Void>,
         operationType: OperationType,
         path: String,
-        expectOnline: Boolean
+        isOnline: Boolean
     ): Result<WriteSyncResult> {
         task.addOnFailureListener { error ->
             handleFirestoreError(error, operationType, path)
         }
-        if (!expectOnline) {
-            return Result.success(WriteSyncResult.QUEUED_OFFLINE)
-        }
-        return try {
-            val completed = withTimeoutOrNull(2200L) {
-                task.await()
-                true
-            }
-            if (completed == true) {
-                Result.success(WriteSyncResult.SYNCED_CLOUD)
-            } else {
-                Result.success(WriteSyncResult.QUEUED_OFFLINE)
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            handleFirestoreError(e, operationType, path)
-            Result.failure(e)
-        }
+        return Result.success(
+            if (isOnline) WriteSyncResult.SYNCED_CLOUD else WriteSyncResult.QUEUED_OFFLINE
+        )
     }
 
     companion object {
@@ -630,7 +843,7 @@ class DeviceSyncRepository(
                 instance.firestoreSettings = firestoreSettings {
                     setLocalCacheSettings(
                         persistentCacheSettings {
-                            setSizeBytes(100L * 1024L * 1024L)
+                            setSizeBytes(250L * 1024L * 1024L)
                         }
                     )
                 }

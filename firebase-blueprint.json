@@ -239,6 +239,63 @@
         "androidVersion",
         "createdAt"
       ]
+    },
+    "VaultItem": {
+      "title": "VaultItem",
+      "description": "Offline-saved account reference, app, game, file metadata, or custom record synced to Cloud Firestore.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID."
+        },
+        "title": {
+          "type": "string",
+          "description": "Display name of the saved account, app, game, file, or item."
+        },
+        "subtitle": {
+          "type": "string",
+          "description": "Identifier, package name, file MIME/metadata, or short descriptor."
+        },
+        "notes": {
+          "type": "string",
+          "description": "Offline-accessible details or progress notes."
+        },
+        "category": {
+          "type": "string",
+          "enum": ["ACCOUNT", "APP", "GAME", "FILE", "OTHER"],
+          "description": "Vault item category."
+        },
+        "sizeLabel": {
+          "type": "string",
+          "description": "Size, version, level, or tag label."
+        },
+        "pinnedOffline": {
+          "type": "boolean",
+          "description": "Whether explicitly pinned/saved for offline access."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp set via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "userId",
+        "title",
+        "subtitle",
+        "notes",
+        "category",
+        "sizeLabel",
+        "pinnedOffline",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -265,6 +322,12 @@
         "$ref": "#/entities/DebugLogEntry"
       },
       "description": "Diagnostic and auth/sync breadcrumb logs."
+    },
+    "/users/{userId}/vault_items/{itemId}": {
+      "schema": {
+        "$ref": "#/entities/VaultItem"
+      },
+      "description": "Offline-saved accounts, apps, games, files, and other items."
     }
   }
 }
